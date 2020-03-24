@@ -675,6 +675,21 @@ case "$host_os" in
     LIBHOGWEED_LINK='$(CC) $(CFLAGS) $(LDFLAGS) -G -h $(LIBHOGWEED_SONAME)'
     LIBHOGWEED_LIBS='libnettle.so $(LIBS)'
     ;;
+  os2*)
+    LIBNETTLE_FORLINK='nettle$(LIBNETTLE_MAJOR)$(LIBNETTLE_MINOR).dll'
+    LIBNETTLE_SONAME=''
+    LIBNETTLE_FILE='libnettle_dll.a'
+    LIBNETTLE_FILE_SRC='$(LIBNETTLE_FILE)'
+    LIBNETTLE_LINK='$(CC) $(CFLAGS) $(LDFLAGS) -Zdll'
+    LIBNETTLE_LIBS='$(LIBS)'
+
+    LIBHOGWEED_FORLINK='hogwee$(LIBHOGWEED_MAJOR)$(LIBHOGWEED_MINOR).dll'
+    LIBHOGWEED_SONAME=''
+    LIBHOGWEED_FILE='libhogweed_dll.a'
+    LIBHOGWEED_FILE_SRC='$(LIBHOGWEED_FILE)'
+    LIBHOGWEED_LINK='$(CC) $(CFLAGS) $(LDFLAGS) -Zdll'
+    LIBHOGWEED_LIBS='libnettle_dll.a $(LIBS)'
+    ;;
   *)
     LIBNETTLE_FORLINK=libnettle.so
     LIBNETTLE_SONAME='$(LIBNETTLE_FORLINK).$(LIBNETTLE_MAJOR)'
@@ -955,7 +970,13 @@ if test x$GCC = xyes ; then
   if $CC --version | grep '^2\.96$' 1>/dev/null 2>&1; then
     true
   else
+  case "$host_os" in
+    os2*)
+      ;;
+    *)
     CFLAGS="$CFLAGS -ggdb3"
+      ;;
+  esac
   fi
   # FIXME: It would be better to actually test if this option works and/or is needed.
   # Or perhaps use -funsigned-char.
