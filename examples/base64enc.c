@@ -37,7 +37,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#ifdef WIN32
+#if defined(WIN32) || defined(__OS2__)
 #include <fcntl.h>
 #endif
 
@@ -64,7 +64,10 @@ main(int argc UNUSED, char **argv UNUSED)
   base64_encode_init(&b64_ctx);
 
 #ifdef WIN32
-  _setmode(0, O_BINARY);
+  _setmode(1, O_BINARY);
+#endif
+#ifdef __OS2__
+  setmode(1, O_BINARY);
 #endif
 
   for (;;)

@@ -37,7 +37,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#ifdef WIN32
+#if defined(WIN32) || defined(__OS2__)
 #include <fcntl.h>
 #endif
 
@@ -61,6 +61,9 @@ main(int argc UNUSED, char **argv UNUSED)
 
 #ifdef WIN32
   _setmode(0, O_BINARY);
+#endif
+#ifdef __OS2__
+  setmode(0, O_BINARY);
 #endif
   
   /* There is no context to initialize. */

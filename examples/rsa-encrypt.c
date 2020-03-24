@@ -39,7 +39,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#ifdef WIN32
+#if defined(WIN32) || defined(__OS2__)
 #include <fcntl.h>
 #endif
 
@@ -244,6 +244,10 @@ main(int argc, char **argv)
 #ifdef WIN32
   _setmode(0, O_BINARY);
   _setmode(1, O_BINARY);
+#endif
+#ifdef __OS2__
+  setmode(0, O_BINARY);
+  setmode(1, O_BINARY);
 #endif
 
   write_version(stdout);
