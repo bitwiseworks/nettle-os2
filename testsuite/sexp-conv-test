@@ -9,7 +9,7 @@ print_raw () {
 }
 
 print_nl () {
-    printf "%s\n" "$1" > "$2"
+    printf "%s\n" "$1" | tr -d '\r' > "$2"
 }
 
 test_advanced () {

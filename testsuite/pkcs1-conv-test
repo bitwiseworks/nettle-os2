@@ -38,7 +38,8 @@ EOF
 $EMULATOR ../examples/rsa-sign testkey.priv >testtmp <<EOF || exit 1
 gazonk
 EOF
-tr -d '\r' < testtmp > testsignature
+#tr -d '\r' < testtmp > testsignature
+cat testtmp > testsignature
 
 # Signature on the data "gazonk\n", using sha1 and the above key
 cat > testsignature2 <<EOF && diff testsignature testsignature2 || exit 1
