@@ -16,7 +16,7 @@ main (int argc UNUSED, char **argv UNUSED)
 {
 #if HAVE_LIBDL
 #ifdef __OS2__
-  void *handle = dlopen ("../nettle70.dll", RTLD_NOW);
+  void *handle = dlopen ("../nettle88.dll", RTLD_NOW);
 #else
   void *handle = dlopen ("../libnettle." SO_EXT, RTLD_NOW);
 #endif
