@@ -5,6 +5,12 @@
 #include <dlfcn.h>
 #endif
 
+#ifdef __APPLE__
+#define SO_EXT "dylib"
+#else
+#define SO_EXT "so"
+#endif
+
 int
 main (int argc UNUSED, char **argv UNUSED)
 {
@@ -12,7 +18,7 @@ main (int argc UNUSED, char **argv UNUSED)
 #ifdef __OS2__
   void *handle = dlopen ("../nettle70.dll", RTLD_NOW);
 #else
-  void *handle = dlopen ("../libnettle.so", RTLD_NOW);
+  void *handle = dlopen ("../libnettle." SO_EXT, RTLD_NOW);
 #endif
   int (*get_version)(void);
   if (!handle)

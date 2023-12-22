@@ -11,7 +11,9 @@
 #include "nettle-internal.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <ctype.h>
+#include <sys/time.h>
 
 void
 die(const char *format, ...)
@@ -434,6 +436,7 @@ test_cipher_cfb8(const struct nettle_cipher *cipher,
   uint8_t *data, *data2;
   uint8_t *iv = xalloc(cipher->block_size);
   size_t length;
+  size_t block;
 
   ASSERT (cleartext->length == ciphertext->length);
   length = cleartext->length;
@@ -441,45 +444,70 @@ test_cipher_cfb8(const struct nettle_cipher *cipher,
   ASSERT (key->length == cipher->key_size);
   ASSERT (iiv->length == cipher->block_size);
 
-  data = xalloc(length);
-  data2 = xalloc(length);
+  data = xalloc(length + 1);
+  data2 = xalloc(length + 1);
 
-  cipher->set_encrypt_key(ctx, key->data);
-  memcpy(iv, iiv->data, cipher->block_size);
-
-  cfb8_encrypt(ctx, cipher->encrypt,
-	      cipher->block_size, iv,
-	      length, data, cleartext->data);
-
-  if (!MEMEQ(length, data, ciphertext->data))
+  for (block = 1; block <= length; block++)
     {
-      fprintf(stderr, "CFB8 encrypt failed:\nInput:");
-      tstring_print_hex(cleartext);
-      fprintf(stderr, "\nOutput: ");
-      print_hex(length, data);
-      fprintf(stderr, "\nExpected:");
-      tstring_print_hex(ciphertext);
-      fprintf(stderr, "\n");
-      FAIL();
-    }
-  cipher->set_encrypt_key(ctx, key->data);
-  memcpy(iv, iiv->data, cipher->block_size);
+      size_t i;
 
-  cfb8_decrypt(ctx, cipher->encrypt,
-	      cipher->block_size, iv,
-	      length, data2, data);
+      cipher->set_encrypt_key(ctx, key->data);
+      memcpy(iv, iiv->data, cipher->block_size);
 
-  if (!MEMEQ(length, data2, cleartext->data))
-    {
-      fprintf(stderr, "CFB8 decrypt failed:\nInput:");
-      tstring_print_hex(ciphertext);
-      fprintf(stderr, "\nOutput: ");
-      print_hex(length, data2);
-      fprintf(stderr, "\nExpected:");
-      tstring_print_hex(cleartext);
-      fprintf(stderr, "\n");
-      FAIL();
+      memset(data, 0x17, length + 1);
+      for (i = 0; i + block <= length; i += block)
+	{
+	  cfb8_encrypt(ctx, cipher->encrypt,
+		       cipher->block_size, iv,
+		       block, data + i, cleartext->data + i);
+	}
+      cfb8_encrypt(ctx, cipher->encrypt,
+		   cipher->block_size, iv,
+		   length - i, data + i, cleartext->data + i);
+
+      if (!MEMEQ(length, data, ciphertext->data))
+	{
+	  fprintf(stderr, "CFB8 encrypt failed, block size %lu:\nInput:",
+		  (unsigned long) block);
+	  tstring_print_hex(cleartext);
+	  fprintf(stderr, "\nOutput: ");
+	  print_hex(length, data);
+	  fprintf(stderr, "\nExpected:");
+	  tstring_print_hex(ciphertext);
+	  fprintf(stderr, "\n");
+	  FAIL();
+	}
+      ASSERT (data[length] == 0x17);
+
+      cipher->set_encrypt_key(ctx, key->data);
+      memcpy(iv, iiv->data, cipher->block_size);
+
+      memset(data2, 0x17, length + 1);
+      for (i = 0; i + block <= length; i += block)
+	{
+	  cfb8_decrypt(ctx, cipher->encrypt,
+		       cipher->block_size, iv,
+		       block, data2 + i, data + i);
+	}
+      cfb8_decrypt(ctx, cipher->encrypt,
+		   cipher->block_size, iv,
+		   length - i, data2 + i, data + i);
+
+      if (!MEMEQ(length, data2, cleartext->data))
+	{
+	  fprintf(stderr, "CFB8 decrypt failed, block size %lu:\nInput:",
+		  (unsigned long) block);
+	  tstring_print_hex(ciphertext);
+	  fprintf(stderr, "\nOutput: ");
+	  print_hex(length, data2);
+	  fprintf(stderr, "\nExpected:");
+	  tstring_print_hex(cleartext);
+	  fprintf(stderr, "\n");
+	  FAIL();
+	}
+      ASSERT (data[length] == 0x17);
     }
+
   cipher->set_encrypt_key(ctx, key->data);
   memcpy(iv, iiv->data, cipher->block_size);
   memcpy(data, cleartext->data, length);
@@ -770,68 +798,263 @@ test_aead(const struct nettle_aead *aead,
 	  const struct tstring *digest)
 {
   void *ctx = xalloc(aead->context_size);
-  uint8_t *data;
-  uint8_t *buffer = xalloc(aead->digest_size);
-  size_t length;
+  uint8_t *in, *out;
+  uint8_t *buffer;
+  unsigned in_align;
 
   ASSERT (cleartext->length == ciphertext->length);
-  length = cleartext->length;
+  ASSERT (key->length == aead->key_size);
+  ASSERT(aead->block_size > 0);
+
+  buffer = xalloc(aead->digest_size);
+  in = xalloc(cleartext->length + aead->block_size - 1);
+  out = xalloc(cleartext->length + aead->block_size - 1);
+
+  for (in_align = 0; in_align < aead->block_size; in_align++)
+    {
+      /* Different alignment, but don't try all combinations. */
+      unsigned out_align = 3*in_align % aead->block_size;
+      size_t offset;
+      memcpy (in + in_align, cleartext->data, cleartext->length);
+      for (offset = 0; offset <= cleartext->length; offset += aead->block_size)
+	{
+	  /* encryption */
+	  aead->set_encrypt_key(ctx, key->data);
+
+	  if (set_nonce)
+	      set_nonce (ctx, nonce->length, nonce->data);
+	  else
+	    {
+	      assert (nonce->length == aead->nonce_size);
+	      aead->set_nonce(ctx, nonce->data);
+	    }
+	  if (aead->update && authtext->length)
+	    aead->update(ctx, authtext->length, authtext->data);
+
+	  if (offset > 0)
+	    aead->encrypt(ctx, offset, out + out_align, in + in_align);
+
+	  if (offset < cleartext->length)
+	    aead->encrypt(ctx, cleartext->length - offset,
+			  out + out_align + offset, in + in_align + offset);
+
+	  if (!MEMEQ(cleartext->length, out + out_align, ciphertext->data))
+	    {
+	      fprintf(stderr, "aead->encrypt failed (offset = %u):\nclear: ",
+		      (unsigned) offset);
+	      tstring_print_hex(cleartext);
+	      fprintf(stderr, "  got: ");
+	      print_hex(cleartext->length, out + out_align);
+	      fprintf(stderr, "  exp: ");
+	      tstring_print_hex(ciphertext);
+	      FAIL();
+	    }
+	  if (digest)
+	    {
+	      ASSERT (digest->length <= aead->digest_size);
+	      memset(buffer, 0, aead->digest_size);
+	      aead->digest(ctx, digest->length, buffer);
+	      if (!MEMEQ(digest->length, buffer, digest->data))
+		{
+		  fprintf(stderr, "aead->digest failed (offset = %u):\n  got: ",
+			  (unsigned) offset);
+		  print_hex(digest->length, buffer);
+		  fprintf(stderr, "  exp: ");
+		  tstring_print_hex(digest);
+		  FAIL();
+		}
+	    }
+	  else
+	    ASSERT(!aead->digest);
+
+	  /* decryption */
+	  if (aead->set_decrypt_key)
+	    {
+	      aead->set_decrypt_key(ctx, key->data);
+
+	      if (set_nonce)
+		set_nonce (ctx, nonce->length, nonce->data);
+	      else
+		{
+		  assert (nonce->length == aead->nonce_size);
+		  aead->set_nonce(ctx, nonce->data);
+		}
+
+	      if (aead->update && authtext->length)
+		aead->update(ctx, authtext->length, authtext->data);
+
+	      if (offset > 0)
+		aead->decrypt (ctx, offset, out + out_align, out + out_align);
+
+	      if (offset < cleartext->length)
+		aead->decrypt(ctx, cleartext->length - offset,
+			      out + out_align + offset, out + out_align + offset);
+
+	      ASSERT(MEMEQ(cleartext->length, out + out_align, cleartext->data));
+
+	      if (digest)
+		{
+		  memset(buffer, 0, aead->digest_size);
+		  aead->digest(ctx, digest->length, buffer);
+		  ASSERT(MEMEQ(digest->length, buffer, digest->data));
+		}
+	    }
+	}
+    }
+  free(ctx);
+  free(in);
+  free(out);
+  free(buffer);
+}
+
+void
+test_aead_message (const struct nettle_aead_message *aead,
+		   const struct tstring *key,
+		   const struct tstring *nonce,
+		   const struct tstring *adata,
+		   const struct tstring *clear,
+		   const struct tstring *cipher)
+{
+  void *ctx = xalloc (aead->context_size);
+  uint8_t *buf = xalloc (cipher->length + 1);
+  uint8_t *copy = xalloc (cipher->length);
+
+  static const uint8_t nul = 0;
+  int res;
 
   ASSERT (key->length == aead->key_size);
-  ASSERT (digest->length <= aead->digest_size);
+  ASSERT (cipher->length > clear->length);
+  ASSERT (cipher->length - clear->length == aead->digest_size);
 
-  data = xalloc(length);
-  
-  /* encryption */
-  memset(buffer, 0, aead->digest_size);
-  aead->set_encrypt_key(ctx, key->data);
-
-  if (nonce->length != aead->nonce_size)
+  aead->set_encrypt_key (ctx, key->data);
+  buf[cipher->length] = 0xae;
+  aead->encrypt (ctx,
+		 nonce->length, nonce->data,
+		 adata->length, adata->data,
+		 cipher->length, buf, clear->data);
+  if (!MEMEQ (cipher->length, cipher->data, buf))
     {
-      ASSERT (set_nonce);
-      set_nonce (ctx, nonce->length, nonce->data);
+      fprintf(stderr, "aead->encrypt (message) failed:\n  got: ");
+      print_hex (cipher->length, buf);
+      fprintf (stderr, "  exp: ");
+      tstring_print_hex (cipher);
+      FAIL();
     }
-  else
-    aead->set_nonce(ctx, nonce->data);
-
-  if (authtext->length)
-    aead->update(ctx, authtext->length, authtext->data);
-    
-  if (length)
-    aead->encrypt(ctx, length, data, cleartext->data);
-
-  aead->digest(ctx, digest->length, buffer);
-
-  ASSERT(MEMEQ(length, data, ciphertext->data));
-  ASSERT(MEMEQ(digest->length, buffer, digest->data));
-
-  /* decryption */
-  memset(buffer, 0, aead->digest_size);
-
-  aead->set_decrypt_key(ctx, key->data);
-
-  if (nonce->length != aead->nonce_size)
+  if (buf[cipher->length] != 0xae)
     {
-      ASSERT (set_nonce);
-      set_nonce (ctx, nonce->length, nonce->data);
+      fprintf (stderr, "aead->encrypt (message) wrote too much.\n ");
+      FAIL();
     }
-  else
-    aead->set_nonce(ctx, nonce->data);
+  aead->set_decrypt_key (ctx, key->data);
 
-  if (authtext->length)
-    aead->update(ctx, authtext->length, authtext->data);
-    
-  if (length)
-    aead->decrypt(ctx, length, data, data);
+  memset (buf, 0xae, clear->length + 1);
 
-  aead->digest(ctx, digest->length, buffer);
+  res = aead->decrypt (ctx,
+		       nonce->length, nonce->data,
+		       adata->length, adata->data,
+		       clear->length, buf, cipher->data);
+  if (!res)
+    {
+      fprintf (stderr, "decrypting valid ciphertext failed:\n  ");
+      tstring_print_hex (cipher);
+    }
+  if (!MEMEQ (clear->length, clear->data, buf))
+    {
+      fprintf(stderr, "aead->decrypt (message) failed:\n  got: ");
+      print_hex (clear->length, buf);
+      fprintf (stderr, "  exp: ");
+      tstring_print_hex (clear);
+      FAIL();
+    }
 
-  ASSERT(MEMEQ(length, data, cleartext->data));
-  ASSERT(MEMEQ(digest->length, buffer, digest->data));
+  /* Invalid messages */
+  if (clear->length > 0
+      && aead->decrypt (ctx,
+			nonce->length, nonce->data,
+			adata->length, adata->data,
+			clear->length - 1, buf, cipher->data))
+    {
+      fprintf (stderr, "Invalid message (truncated) not rejected\n");
+      FAIL();
+    }
+  memcpy (copy, cipher->data, cipher->length);
+  copy[0] ^= 4;
+  if (aead->decrypt (ctx,
+		     nonce->length, nonce->data,
+		     adata->length, adata->data,
+		     clear->length, buf, copy))
+    {
+      fprintf (stderr, "Invalid message (first byte modified) not rejected\n");
+      FAIL();
+    }
 
-  free(ctx);
-  free(data);
-  free(buffer);
+  memcpy (copy, cipher->data, cipher->length);
+  copy[cipher->length - 1] ^= 4;
+  if (aead->decrypt (ctx,
+		     nonce->length, nonce->data,
+		     adata->length, adata->data,
+		     clear->length, buf, copy))
+    {
+      fprintf (stderr, "Invalid message (last byte modified) not rejected\n");
+      FAIL();
+    }
+
+  if (aead->decrypt (ctx,
+		     nonce->length, nonce->data,
+		     adata->length > 0 ? adata->length - 1 : 1,
+		     adata->length > 0 ? adata->data : &nul,
+		     clear->length, buf, cipher->data))
+    {
+      fprintf (stderr, "Invalid adata not rejected\n");
+      FAIL();
+    }
+
+  /* Test in-place operation. NOTE: Not supported for SIV-CMAC. */
+  if (aead->supports_inplace)
+    {
+      aead->set_encrypt_key (ctx, key->data);
+      buf[cipher->length] = 0xae;
+
+      memcpy (buf, clear->data, clear->length);
+      aead->encrypt (ctx,
+		     nonce->length, nonce->data,
+		     adata->length, adata->data,
+		     cipher->length, buf, buf);
+      if (!MEMEQ (cipher->length, cipher->data, buf))
+	{
+	  fprintf(stderr, "aead->encrypt (in-place message) failed:\n  got: ");
+	  print_hex (cipher->length, buf);
+	  fprintf (stderr, "  exp: ");
+	  tstring_print_hex (cipher);
+	  FAIL();
+	}
+      if (buf[cipher->length] != 0xae)
+	{
+	  fprintf (stderr, "aead->encrypt (in-place message) wrote too much.\n ");
+	  FAIL();
+	}
+
+      res = aead->decrypt (ctx,
+			   nonce->length, nonce->data,
+			   adata->length, adata->data,
+			   clear->length, buf, buf);
+      if (!res)
+	{
+	  fprintf (stderr, "in-place decrypting valid ciphertext failed:\n  ");
+	  tstring_print_hex (cipher);
+	}
+      if (!MEMEQ (clear->length, clear->data, buf))
+	{
+	  fprintf(stderr, "aead->decrypt (in-place message) failed:\n  got: ");
+	  print_hex (clear->length, buf);
+	  fprintf (stderr, "  exp: ");
+	  tstring_print_hex (clear);
+	  FAIL();
+	}
+    }
+  free (ctx);
+  free (buf);
+  free (copy);
 }
 
 void
@@ -840,33 +1063,36 @@ test_hash(const struct nettle_hash *hash,
 	  const struct tstring *digest)
 {
   void *ctx = xalloc(hash->context_size);
-  uint8_t *buffer = xalloc(hash->digest_size);
+  uint8_t *buffer = xalloc(digest->length);
   uint8_t *input;
   unsigned offset;
 
-  ASSERT (digest->length == hash->digest_size);
+  /* Here, hash->digest_size zero means arbitrary size. */
+  if (hash->digest_size)
+    ASSERT (digest->length == hash->digest_size);
 
   hash->init(ctx);
   hash->update(ctx, msg->length, msg->data);
-  hash->digest(ctx, hash->digest_size, buffer);
+  hash->digest(ctx, digest->length, buffer);
 
-  if (MEMEQ(hash->digest_size, digest->data, buffer) == 0)
+  if (MEMEQ(digest->length, digest->data, buffer) == 0)
     {
       fprintf(stdout, "\nGot:\n");
-      print_hex(hash->digest_size, buffer);
+      print_hex(digest->length, buffer);
       fprintf(stdout, "\nExpected:\n");
-      print_hex(hash->digest_size, digest->data);
+      print_hex(digest->length, digest->data);
       abort();
     }
 
-  memset(buffer, 0, hash->digest_size);
+  memset(buffer, 0, digest->length);
 
   hash->update(ctx, msg->length, msg->data);
-  hash->digest(ctx, hash->digest_size - 1, buffer);
+  ASSERT(digest->length > 0);
+  hash->digest(ctx, digest->length - 1, buffer);
 
-  ASSERT(MEMEQ(hash->digest_size - 1, digest->data, buffer));
+  ASSERT(MEMEQ(digest->length - 1, digest->data, buffer));
 
-  ASSERT(buffer[hash->digest_size - 1] == 0);
+  ASSERT(buffer[digest->length - 1] == 0);
 
   input = xalloc (msg->length + 16);
   for (offset = 0; offset < 16; offset++)
@@ -874,13 +1100,13 @@ test_hash(const struct nettle_hash *hash,
       memset (input, 0, msg->length + 16);
       memcpy (input + offset, msg->data, msg->length);
       hash->update (ctx, msg->length, input + offset);
-      hash->digest (ctx, hash->digest_size, buffer);
-      if (MEMEQ(hash->digest_size, digest->data, buffer) == 0)
+      hash->digest (ctx, digest->length, buffer);
+      if (MEMEQ(digest->length, digest->data, buffer) == 0)
 	{
 	  fprintf(stdout, "hash input address: %p\nGot:\n", input + offset);
-	  print_hex(hash->digest_size, buffer);
+	  print_hex(digest->length, buffer);
 	  fprintf(stdout, "\nExpected:\n");
-	  print_hex(hash->digest_size, digest->data);
+	  print_hex(digest->length, digest->data);
 	  abort();
 	}      
     }
@@ -922,6 +1148,69 @@ test_hash_large(const struct nettle_hash *hash,
   free(ctx);
   free(buffer);
   free(data);
+}
+
+void
+test_mac(const struct nettle_mac *mac,
+	 const struct tstring *key,
+	 const struct tstring *msg,
+	 const struct tstring *digest)
+{
+  void *ctx = xalloc(mac->context_size);
+  uint8_t *hash = xalloc(mac->digest_size);
+  unsigned i;
+
+  ASSERT (digest->length <= mac->digest_size);
+  ASSERT (key->length == mac->key_size);
+  mac->set_key (ctx, key->data);
+  mac->update (ctx, msg->length, msg->data);
+  mac->digest (ctx, digest->length, hash);
+
+  if (!MEMEQ (digest->length, digest->data, hash))
+    {
+      fprintf (stderr, "test_mac failed, msg: ");
+      print_hex (msg->length, msg->data);
+      fprintf(stderr, "Output:");
+      print_hex (mac->digest_size, hash);
+      fprintf(stderr, "Expected:");
+      tstring_print_hex(digest);
+      fprintf(stderr, "\n");
+      FAIL();
+    }
+
+  /* attempt to re-use the structure */
+  mac->update (ctx, msg->length, msg->data);
+  mac->digest (ctx, digest->length, hash);
+  if (!MEMEQ (digest->length, digest->data, hash))
+    {
+      fprintf (stderr, "test_mac: failed on re-use, msg: ");
+      print_hex (msg->length, msg->data);
+      fprintf(stderr, "Output:");
+      print_hex (mac->digest_size, hash);
+      fprintf(stderr, "Expected:");
+      tstring_print_hex(digest);
+      fprintf(stderr, "\n");
+      FAIL();
+    }
+
+  /* attempt byte-by-byte hashing */
+  mac->set_key (ctx, key->data);
+  for (i=0;i<msg->length;i++)
+    mac->update (ctx, 1, msg->data+i);
+  mac->digest (ctx, digest->length, hash);
+  if (!MEMEQ (digest->length, digest->data, hash))
+    {
+      fprintf (stderr, "cmac_hash failed on byte-by-byte, msg: ");
+      print_hex (msg->length, msg->data);
+      fprintf(stderr, "Output:");
+      print_hex (16, hash);
+      fprintf(stderr, "Expected:");
+      tstring_print_hex(digest);
+      fprintf(stderr, "\n");
+      FAIL();
+    }
+  free (ctx);
+  free (hash);
 }
 
 void
@@ -971,19 +1260,6 @@ test_armor(const struct nettle_armor *armor,
 
 #if WITH_HOGWEED
 
-#ifndef mpn_zero_p
-int
-mpn_zero_p (mp_srcptr ap, mp_size_t n)
-{
-  while (--n >= 0)
-    {
-      if (ap[n] != 0)
-	return 0;
-    }
-  return 1;
-}
-#endif
-
 void
 mpn_out_str (FILE *f, int base, const mp_limb_t *xp, mp_size_t xn)
 {
@@ -1008,7 +1284,70 @@ mpz_urandomb (mpz_t r, struct knuth_lfib_ctx *ctx, mp_bitcnt_t bits)
   nettle_mpz_set_str_256_u (r, bytes, buf);
   free (buf);
 }
-#endif /* NETTLE_USE_MINI_GMP */
+void
+mpz_urandomm (mpz_t r, struct knuth_lfib_ctx *ctx, const mpz_t n)
+{
+  /* Add some extra bits, to make result almost unbiased. */
+  mpz_urandomb(r, ctx, mpz_sizeinbase(n, 2) + 30);
+  mpz_mod(r, r, n);
+}
+#else /* !NETTLE_USE_MINI_GMP */
+static void
+get_random_seed(mpz_t seed)
+{
+  struct timeval tv;
+  FILE *f;
+  f = fopen ("/dev/urandom", "rb");
+  if (f)
+    {
+      uint8_t buf[8];
+      size_t res;
+
+      setbuf (f, NULL);
+      res = fread (&buf, sizeof(buf), 1, f);
+      fclose(f);
+      if (res == 1)
+	{
+	  nettle_mpz_set_str_256_u (seed, sizeof(buf), buf);
+	  return;
+	}
+      fprintf (stderr, "Read of /dev/urandom failed: %s\n",
+	       strerror (errno));
+    }
+  gettimeofday(&tv, NULL);
+  mpz_set_ui (seed, tv.tv_sec);
+  mpz_mul_ui (seed, seed, 1000000UL);
+  mpz_add_ui (seed, seed, tv.tv_usec);
+}
+
+int
+test_randomize(gmp_randstate_t rands)
+{
+  const char *nettle_test_seed;
+
+  nettle_test_seed = getenv ("NETTLE_TEST_SEED");
+  if (nettle_test_seed && *nettle_test_seed)
+    {
+      mpz_t seed;
+      mpz_init (seed);
+      if (mpz_set_str (seed, nettle_test_seed, 0) < 0
+	  || mpz_sgn (seed) < 0)
+	die ("Invalid NETTLE_TEST_SEED: %s\n",
+	     nettle_test_seed);
+      if (mpz_sgn (seed) == 0)
+	get_random_seed (seed);
+      fprintf (stderr, "Using NETTLE_TEST_SEED=");
+      mpz_out_str (stderr, 10, seed);
+      fprintf (stderr, "\n");
+
+      gmp_randseed (rands, seed);
+      mpz_clear (seed);
+      return 1;
+    }
+  else 
+    return 0;
+}
+#endif /* !NETTLE_USE_MINI_GMP */
 
 mp_limb_t *
 xalloc_limbs (mp_size_t n)
@@ -1283,7 +1622,6 @@ test_rsa_key(struct rsa_public_key *pub,
   
   if (verbose)
     {
-      /* FIXME: Use gmp_printf */
       fprintf(stderr, "Public key: n=");
       mpz_out_str(stderr, 16, pub->n);
       fprintf(stderr, "\n    e=");
@@ -1583,20 +1921,91 @@ const struct ecc_curve * const ecc_curves[] = {
   &_nettle_secp_384r1,
   &_nettle_secp_521r1,
   &_nettle_curve25519,
+  &_nettle_curve448,
+  &_nettle_gost_gc256b,
+  &_nettle_gost_gc512a,
   NULL
 };
+
+int
+test_ecc_point_valid_p (struct ecc_point *pub)
+{
+  mpz_t t, x, y;
+  mpz_t lhs, rhs;
+  int res;
+  mp_size_t size;
+
+  size = pub->ecc->p.size;
+
+  /* First check range */
+  if (mpn_cmp (pub->p, pub->ecc->p.m, size) >= 0
+      || mpn_cmp (pub->p + size, pub->ecc->p.m, size) >= 0)
+    return 0;
+
+  mpz_init (lhs);
+  mpz_init (rhs);
+
+  mpz_roinit_n (x, pub->p, size);
+  mpz_roinit_n (y, pub->p + size, size);
+
+  mpz_mul (lhs, y, y);
+
+  if (pub->ecc->p.bit_size == 255)
+    {
+      /* Check that
+	 121666 (1 + x^2 - y^2) = 121665 x^2 y^2 */
+      mpz_t x2;
+      mpz_init (x2);
+      mpz_mul (x2, x, x); /* x^2 */
+      mpz_mul (rhs, x2, lhs); /* x^2 y^2 */
+      mpz_sub (lhs, x2, lhs); /* x^2 - y^2 */
+      mpz_add_ui (lhs, lhs, 1); /* 1 + x^2 - y^2 */
+      mpz_mul_ui (lhs, lhs, 121666);
+      mpz_mul_ui (rhs, rhs, 121665);
+
+      mpz_clear (x2);
+    }
+  else if (pub->ecc->p.bit_size == 448)
+    {
+      /* Check that
+	 x^2 + y^2 = 1 - 39081 x^2 y^2 */
+      mpz_t x2, d;
+      mpz_init (x2);
+      mpz_init_set_ui (d, 39081);
+      mpz_mul (x2, x, x); /* x^2 */
+      mpz_mul (d, d, x2); /* 39081 x^2 */
+      mpz_set_ui (rhs, 1);
+      mpz_submul (rhs, d, lhs); /* 1 - 39081 x^2 y^2 */
+      mpz_add (lhs, x2, lhs);	/* x^2 + y^2 */
+
+      mpz_clear (d);
+      mpz_clear (x2);
+    }
+  else
+    {
+      /* Check y^2 = x^3 - 3 x + b */
+      mpz_mul (rhs, x, x);
+      mpz_sub_ui (rhs, rhs, 3);
+      mpz_mul (rhs, rhs, x);
+      mpz_add (rhs, rhs, mpz_roinit_n (t, pub->ecc->b, size));
+    }
+  res = mpz_congruent_p (lhs, rhs, mpz_roinit_n (t, pub->ecc->p.m, size));
+
+  mpz_clear (lhs);
+  mpz_clear (rhs);
+
+  return res;
+}
 
 static int
 test_mpn (const char *ref, const mp_limb_t *xp, mp_size_t n)
 {
-  mpz_t r;
+  mpz_t r, x;
   int res;
 
   mpz_init_set_str (r, ref, 16);
-  while (n > 0 && xp[n-1] == 0)
-    n--;
   
-  res = (mpz_limbs_cmp (r, xp, n) == 0);
+  res = (mpz_cmp (r, mpz_roinit_n (x, xp, n)) == 0);
   mpz_clear (r);
   return res;
 }
@@ -1616,8 +2025,8 @@ test_ecc_point (const struct ecc_curve *ecc,
   if (! (test_mpn (ref->x, p, ecc->p.size)
 	 && test_mpn (ref->y, p + ecc->p.size, ecc->p.size) ))
     {
-      fprintf (stderr, "Incorrect point!\n"
-	       "got: x = ");
+      fprintf (stderr, "Incorrect point, curve bits %d!\n"
+	       "got: x = ", ecc->p.bit_size);
       write_mpn (stderr, 16, p, ecc->p.size);
       fprintf (stderr, "\n"
 	       "     y = ");
@@ -1630,80 +2039,140 @@ test_ecc_point (const struct ecc_curve *ecc,
     }
 }
 
-void
-test_ecc_mul_a (unsigned curve, unsigned n, const mp_limb_t *p)
-{
-  /* For each curve, the points 2 g, 3 g and 4 g */
-  static const struct ecc_ref_point ref[6][3] = {
-    { { "dafebf5828783f2ad35534631588a3f629a70fb16982a888",
+/* For each curve, the points g, 2 g, 3 g and 4 g */
+static const struct ecc_ref_point ecc_ref[9][4] = {
+  { { "188da80eb03090f67cbf20eb43a18800f4ff0afd82ff1012",
+      "07192b95ffc8da78631011ed6b24cdd573f977a11e794811" },
+    { "dafebf5828783f2ad35534631588a3f629a70fb16982a888",
 	"dd6bda0d993da0fa46b27bbc141b868f59331afa5c7e93ab" },
-      { "76e32a2557599e6edcd283201fb2b9aadfd0d359cbb263da",
+    { "76e32a2557599e6edcd283201fb2b9aadfd0d359cbb263da",
 	"782c37e372ba4520aa62e0fed121d49ef3b543660cfd05fd" },
-      { "35433907297cc378b0015703374729d7a4fe46647084e4ba",
+    { "35433907297cc378b0015703374729d7a4fe46647084e4ba",
 	"a2649984f2135c301ea3acb0776cd4f125389b311db3be32" }
-    },
-    { { "706a46dc76dcb76798e60e6d89474788d16dc18032d268fd1a704fa6",
+  },
+  { { "b70e0cbd6bb4bf7f321390b94a03c1d356c21122343280d6115c1d21",
+	"bd376388b5f723fb4c22dfe6cd4375a05a07476444d5819985007e34" },
+    { "706a46dc76dcb76798e60e6d89474788d16dc18032d268fd1a704fa6",
 	"1c2b76a7bc25e7702a704fa986892849fca629487acf3709d2e4e8bb" },
-      { "df1b1d66a551d0d31eff822558b9d2cc75c2180279fe0d08fd896d04",
+    { "df1b1d66a551d0d31eff822558b9d2cc75c2180279fe0d08fd896d04",
 	"a3f7f03cadd0be444c0aa56830130ddf77d317344e1af3591981a925" },
-      { "ae99feebb5d26945b54892092a8aee02912930fa41cd114e40447301",
+    { "ae99feebb5d26945b54892092a8aee02912930fa41cd114e40447301",
 	"482580a0ec5bc47e88bc8c378632cd196cb3fa058a7114eb03054c9" },
-    },
-    { { "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
+  },
+  { { "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+	"4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5" },
+    { "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
 	"7775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1" },
-      { "5ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c",
+    { "5ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c",
 	"8734640c4998ff7e374b06ce1a64a2ecd82ab036384fb83d9a79b127a27d5032" },
-      { "e2534a3532d08fbba02dde659ee62bd0031fe2db785596ef509302446b030852",
+    { "e2534a3532d08fbba02dde659ee62bd0031fe2db785596ef509302446b030852",
 	"e0f1575a4c633cc719dfee5fda862d764efc96c3f30ee0055c42c23f184ed8c6" },
-    },
-    { { "8d999057ba3d2d969260045c55b97f089025959a6f434d651d207d19fb96e9e"
+  },
+  { { "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a38"
+	"5502f25dbf55296c3a545e3872760ab7",
+	"3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c0"
+	"0a60b1ce1d7e819d7a431d7c90ea0e5f" },
+    { "8d999057ba3d2d969260045c55b97f089025959a6f434d651d207d19fb96e9e"
 	"4fe0e86ebe0e64f85b96a9c75295df61",
 	"8e80f1fa5b1b3cedb7bfe8dffd6dba74b275d875bc6cc43e904e505f256ab425"
 	"5ffd43e94d39e22d61501e700a940e80" },
-      { "77a41d4606ffa1464793c7e5fdc7d98cb9d3910202dcd06bea4f240d3566da6"
+    { "77a41d4606ffa1464793c7e5fdc7d98cb9d3910202dcd06bea4f240d3566da6"
 	"b408bbae5026580d02d7e5c70500c831",
 	"c995f7ca0b0c42837d0bbe9602a9fc998520b41c85115aa5f7684c0edc111eac"
 	"c24abd6be4b5d298b65f28600a2f1df1" },
-      { "138251cd52ac9298c1c8aad977321deb97e709bd0b4ca0aca55dc8ad51dcfc9d"
+    { "138251cd52ac9298c1c8aad977321deb97e709bd0b4ca0aca55dc8ad51dcfc9d"
 	"1589a1597e3a5120e1efd631c63e1835",
 	"cacae29869a62e1631e8a28181ab56616dc45d918abc09f3ab0e63cf792aa4dc"
 	"ed7387be37bba569549f1c02b270ed67" },
-    },
-    { { "43"
+  },
+  { { "c6"
+	"858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dba"
+	"a14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66",
+	"118"
+	"39296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c"
+	"97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650" },
+    { "43"
 	"3c219024277e7e682fcb288148c282747403279b1ccc06352c6e5505d769be97"
 	"b3b204da6ef55507aa104a3a35c5af41cf2fa364d60fd967f43e3933ba6d783d",
 	"f4"
 	"bb8cc7f86db26700a7f3eceeeed3f0b5c6b5107c4da97740ab21a29906c42dbb"
 	"b3e377de9f251f6b93937fa99a3248f4eafcbe95edc0f4f71be356d661f41b02"
-      },
-      { "1a7"
+    },
+    { "1a7"
 	"3d352443de29195dd91d6a64b5959479b52a6e5b123d9ab9e5ad7a112d7a8dd1"
 	"ad3f164a3a4832051da6bd16b59fe21baeb490862c32ea05a5919d2ede37ad7d",
 	"13e"
 	"9b03b97dfa62ddd9979f86c6cab814f2f1557fa82a9d0317d2f8ab1fa355ceec"
 	"2e2dd4cf8dc575b02d5aced1dec3c70cf105c9bc93a590425f588ca1ee86c0e5" },
-      { "35"
+    { "35"
 	"b5df64ae2ac204c354b483487c9070cdc61c891c5ff39afc06c5d55541d3ceac"
 	"8659e24afe3d0750e8b88e9f078af066a1d5025b08e5a5e2fbc87412871902f3",
 	"82"
 	"096f84261279d2b673e0178eb0b4abb65521aef6e6e32e1b5ae63fe2f19907f2"
 	"79f283e54ba385405224f750a95b85eebb7faef04699d1d9e21f47fc346e4d0d" },
-    },
-    { { "36ab384c9f5a046c3d043b7d1833e7ac080d8e4515d7a45f83c5a14e2843ce0e",
+  },
+  { { "216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a",
+      "6666666666666666666666666666666666666666666666666666666666666658" },
+    { "36ab384c9f5a046c3d043b7d1833e7ac080d8e4515d7a45f83c5a14e2843ce0e",
 	"2260cdf3092329c21da25ee8c9a21f5697390f51643851560e5f46ae6af8a3c9" },
-      { "67ae9c4a22928f491ff4ae743edac83a6343981981624886ac62485fd3f8e25c",
+    { "67ae9c4a22928f491ff4ae743edac83a6343981981624886ac62485fd3f8e25c",
 	"1267b1d177ee69aba126a18e60269ef79f16ec176724030402c3684878f5b4d4" },
-      { "203da8db56cff1468325d4b87a3520f91a739ec193ce1547493aa657c4c9f870",
+    { "203da8db56cff1468325d4b87a3520f91a739ec193ce1547493aa657c4c9f870",
 	"47d0e827cb1595e1470eb88580d5716c4cf22832ea2f0ff0df38ab61ca32112f" },
-    }
-  };
-  assert (curve < 6);
+  },
+  { { "4f1970c66bed0ded221d15a622bf36da9e146570470f1767ea6de324a3d3a46412ae1af72ab66511433b80e18b00938e2626a82bc70cc05e",
+	"693f46716eb6bc248876203756c9c7624bea73736ca3984087789c1e05a0c2d73ad3ff1ce67c39c4fdbd132c4ed7c8ad9808795bf230fa14" },
+    { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa955555555555555555555555555555555555555555555555555555555",
+	"ae05e9634ad7048db359d6205086c2b0036ed7a035884dd7b7e36d728ad8c4b80d6565833a2a3098bbbcb2bed1cda06bdaeafbcdea9386ed" },
+    { "865886b9108af6455bd64316cb6943332241b8b8cda82c7e2ba077a4a3fcfe8daa9cbf7f6271fd6e862b769465da8575728173286ff2f8f",
+	"e005a8dbd5125cf706cbda7ad43aa6449a4a8d952356c3b9fce43c82ec4e1d58bb3a331bdb6767f0bffa9a68fed02dafb822ac13588ed6fc" },
+    { "49dcbc5c6c0cce2c1419a17226f929ea255a09cf4e0891c693fda4be70c74cc301b7bdf1515dd8ba21aee1798949e120e2ce42ac48ba7f30",
+	"d49077e4accde527164b33a5de021b979cb7c02f0457d845c90dc3227b8a5bc1c0d8f97ea1ca9472b5d444285d0d4f5b32e236f86de51839" },
+  },
+  { { "0000000000000000000000000000000000000000000000000000000000000001",
+      "8d91e471e0989cda27df505a453f2b7635294f2ddf23e3b122acc99c9e9f1e14" },
+    { "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd95",
+      "726e1b8e1f676325d820afa5bac0d489cad6b0d220dc1c4edd5336636160df83" },
+    { "8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38d2c",
+      "76bcd1ca9a23b041d4d9baf507a6cd821267a94c838768e8486117796b788a51" },
+    { "f7063e7063e7063e7063e7063e7063e7063e7063e7063e7063e7063e7063e4b7",
+      "83ccf17ba6706d73625cc3534c7a2b9d6ec1ee6a9a7e07c10d84b388de59f741" },
+  },
+  { { "0000000000000000000000000000000000000000000000000000000000000000"
+      "0000000000000000000000000000000000000000000000000000000000000003",
+      "7503cfe87a836ae3a61b8816e25450e6ce5e1c93acf1abc1778064fdcbefa921"
+      "df1626be4fd036e93d75e6a50e3a41e98028fe5fc235f5b889a589cb5215f2a4" },
+    { "3b89dcfc622996ab97a5869dbff15cf51db00954f43a58a5e5f6b0470a132b2f"
+      "4434bbcd405d2a9516151d2a6a04f2e4375bf48de1fdb21fb982afd9d2ea137c",
+      "c813c4e2e2e0a8a391774c7903da7a6f14686e98e183e670ee6fb784809a3e92"
+      "ca209dc631d85b1c7534ed3b37fddf64d854d7e01f91f18bb3fd307591afc051" },
+    { "a1ff1ab2712a267eb53935ddb5a567f84db156cc096168a1174291d5f488fba5"
+      "43d2840b4d2dd35d764b2f57b308907aec55cfba10544e8416e134687ccb87c3",
+      "3cb5c4417ec4637f30374f189bb5b984c41e3a48d7f84fbfa3819e3f333f7eb3"
+      "11d3af7e67c4c16eeacfac2fe94c6dd4c6366f711a4fb6c7125cd7ec518d90d6" },
+    { "b7bfb80956c8670031ba191929f64e301d681634236d47a60e571a4bedc0ef25"
+      "7452ef78b5b98dbb3d9f3129d9349433ce2a3a35cb519c91e2d633d7b373ae16",
+      "3bee95e29eecc5d5ad2beba941abcbf9f1cad478df0fecf614f63aeebef77850"
+      "da7efdb93de8f3df80bc25eac09239c14175f5c29704ce9a3e383f1b3ec0e929" },
+  }
+};
+
+void
+test_ecc_ga (unsigned curve, const mp_limb_t *p)
+{
+  return test_ecc_point (ecc_curves[curve], &ecc_ref[curve][0], p);
+}
+
+void
+test_ecc_mul_a (unsigned curve, unsigned n, const mp_limb_t *p)
+{
+  assert (curve < 9);
   assert (n <= 4);
   if (n == 0)
     {
       /* Makes sense for curve25519 only */
       const struct ecc_curve *ecc = ecc_curves[curve];
-      assert (ecc->p.bit_size == 255);
+      assert (ecc->p.bit_size == 255 || ecc->p.bit_size == 448);
       if (!mpn_zero_p (p, ecc->p.size)
 	  || mpn_cmp (p + ecc->p.size, ecc->unit, ecc->p.size) != 0)
 	{
@@ -1717,29 +2186,8 @@ test_ecc_mul_a (unsigned curve, unsigned n, const mp_limb_t *p)
 	  abort();
 	}
     }
-  else if (n == 1)
-    {
-      const struct ecc_curve *ecc = ecc_curves[curve];
-      if (mpn_cmp (p, ecc->g, 2*ecc->p.size) != 0)
-	{
-	  fprintf (stderr, "Incorrect point (expected g)!\n"
-		   "got: x = ");
-	  write_mpn (stderr, 16, p, ecc->p.size);
-	  fprintf (stderr, "\n"
-		   "     y = ");
-	  write_mpn (stderr, 16, p + ecc->p.size, ecc->p.size);
-	  fprintf (stderr, "\n"
-		   "ref: x = ");
-	  write_mpn (stderr, 16, ecc->g, ecc->p.size);
-	  fprintf (stderr, "\n"
-		   "     y = ");
-	  write_mpn (stderr, 16, ecc->g + ecc->p.size, ecc->p.size);
-	  fprintf (stderr, "\n");
-	  abort();
-	}
-    }
   else
-    test_ecc_point (ecc_curves[curve], &ref[curve][n-2], p);
+    test_ecc_point (ecc_curves[curve], &ecc_ref[curve][n-1], p);
 }
 
 void
@@ -1756,5 +2204,49 @@ test_ecc_mul_h (unsigned curve, unsigned n, const mp_limb_t *p)
   free (scratch);
 }
 
-#endif /* WITH_HOGWEED */
+void
+test_ecc_get_g (unsigned curve, mp_limb_t *rp)
+{
+  const struct ecc_curve *ecc = ecc_curves[curve];
+  mpz_t x;
+  mpz_t y;
+  mpz_init_set_str (x, ecc_ref[curve][0].x, 16);
+  mpz_init_set_str (y, ecc_ref[curve][0].y, 16);
+
+  if (ecc->use_redc)
+    {
+      mpz_t t;
+      mpz_mul_2exp (x, x, ecc->p.size * GMP_NUMB_BITS);
+      mpz_mod (x, x, mpz_roinit_n (t, ecc->p.m, ecc->p.size));
+      mpz_mul_2exp (y, y, ecc->p.size * GMP_NUMB_BITS);
+      mpz_mod (y, y, mpz_roinit_n (t, ecc->p.m, ecc->p.size));
+    }
+  mpz_limbs_copy (rp, x, ecc->p.size);
+  mpz_limbs_copy (rp + ecc->p.size, y, ecc->p.size);
+  mpn_copyi (rp + 2*ecc->p.size, ecc->unit, ecc->p.size);
+
+  mpz_clear (x);
+  mpz_clear (y);
+}
+
+void
+test_ecc_get_ga (unsigned curve, mp_limb_t *rp)
+{
+  const struct ecc_curve *ecc = ecc_curves[curve];
+  mpz_t x;
+  mpz_t y;
+  mpz_init_set_str (x, ecc_ref[curve][0].x, 16);
+  mpz_init_set_str (y, ecc_ref[curve][0].y, 16);
+
+  mpz_limbs_copy (rp, x, ecc->p.size);
+  mpz_limbs_copy (rp + ecc->p.size, y, ecc->p.size);
+
+  mpz_clear (x);
+  mpz_clear (y);
+}
+
+#else /* !WITH_HOGWEED */
+/* Make sure either gmp or mini-gmp is available for tests. */
+#include "mini-gmp.c"
+#endif /* !WITH_HOGWEED */
 
