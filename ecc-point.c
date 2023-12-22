@@ -55,14 +55,15 @@ int
 ecc_point_set (struct ecc_point *p, const mpz_t x, const mpz_t y)
 {
   mp_size_t size;  
-  mpz_t lhs, rhs;
+  mpz_t m, lhs, rhs;
   mpz_t t;
   int res;
 
   size = p->ecc->p.size;
+  mpz_roinit_n (m, p->ecc->p.m, size);
   
-  if (mpz_sgn (x) < 0 || mpz_limbs_cmp (x, p->ecc->p.m, size) >= 0
-      || mpz_sgn (y) < 0 || mpz_limbs_cmp (y, p->ecc->p.m, size) >= 0)
+  if (mpz_sgn (x) < 0 || mpz_cmp (x, m) >= 0
+      || mpz_sgn (y) < 0 || mpz_cmp (y, m) >= 0)
     return 0;
 
   mpz_init (lhs);
@@ -83,6 +84,21 @@ ecc_point_set (struct ecc_point *p, const mpz_t x, const mpz_t y)
       mpz_add_ui (lhs, lhs, 1);
       mpz_mul_ui (lhs, lhs, 121666);
       mpz_mul_ui (rhs, rhs, 121665);
+      mpz_clear (x2);
+    }
+  else if (p->ecc->p.bit_size == 448)
+    {
+      /* curve448 special case. FIXME: Do in some cleaner way? */
+      mpz_t x2, d;
+      mpz_init (x2);
+      mpz_init_set_ui (d, 39081);
+      mpz_mul (x2, x, x); /* x^2 */
+      mpz_mul (d, d, x2); /* 39081 x^2 */
+      mpz_set_ui (rhs, 1);
+      mpz_submul (rhs, d, lhs); /* 1 - 39081 x^2 y^2 */
+      /* Check that x^2 + y^2 = 1 - 39081 x^2 y^2 */
+      mpz_add (lhs, x2, lhs);	/* x^2 + y^2 */
+      mpz_clear (d);
       mpz_clear (x2);
     }
   else

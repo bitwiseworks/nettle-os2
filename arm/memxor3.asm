@@ -1,6 +1,6 @@
 C arm/memxor3.asm
 
-ifelse(<
+ifelse(`
    Copyright (C) 2013, 2015 Niels Möller
 
    This file is part of GNU Nettle.
@@ -28,7 +28,7 @@ ifelse(<
    You should have received copies of the GNU General Public License and
    the GNU Lesser General Public License along with this program.  If
    not, see http://www.gnu.org/licenses/.
->)
+')
 
 C Possible speedups:
 C
@@ -38,21 +38,21 @@ C cycles, regardless of alignment.
 
 C Register usage:
 
-define(<DST>, <r0>)
-define(<AP>, <r1>)
-define(<BP>, <r2>)
-define(<N>, <r3>)
+define(`DST', `r0')
+define(`AP', `r1')
+define(`BP', `r2')
+define(`N', `r3')
 
 C Temporaries r4-r7
-define(<ACNT>, <r8>)
-define(<ATNC>, <r10>)
-define(<BCNT>, <r11>)
-define(<BTNC>, <r12>)
+define(`ACNT', `r8')
+define(`ATNC', `r10')
+define(`BCNT', `r11')
+define(`BTNC', `r12')
 
 C little-endian and big-endian need to shift in different directions for
 C alignment correction
-define(<S0ADJ>, IF_LE(<lsr>, <lsl>))
-define(<S1ADJ>, IF_LE(<lsl>, <lsr>))
+define(`S0ADJ', IF_LE(`lsr', `lsl'))
+define(`S1ADJ', IF_LE(`lsl', `lsr'))
 
 	.syntax unified
 
@@ -159,21 +159,23 @@ PROLOGUE(nettle_memxor3)
 	adds	N, #8
 	beq	.Lmemxor3_done
 
-	C Leftover bytes in r4, low end
+	C Leftover bytes in r4, low end on LE and high end on BE before
+	C preparatory alignment correction
 	ldr	r5, [AP, #-4]
 	eor	r4, r5, r4, S1ADJ ATNC
-
-	C leftover does an LSB store
-	C so we need to reverse if actually BE
-IF_BE(<	rev	r4, r4>)
+	C now byte-aligned in high end on LE and low end on BE because we're
+	C working downwards in saving the very first bytes of the buffer
 
 .Lmemxor3_au_leftover:
 	C Store a byte at a time
-	ror	r4, #24
+	C bring uppermost byte down for saving while preserving lower ones
+IF_LE(`	ror	r4, #24')
 	strb	r4, [DST, #-1]!
 	subs	N, #1
 	beq	.Lmemxor3_done
 	subs	ACNT, #8
+	C bring down next byte, no need to preserve
+IF_BE(`	lsr	r4, #8')
 	sub	AP, #1
 	bne	.Lmemxor3_au_leftover
 	b	.Lmemxor3_bytes
@@ -273,18 +275,21 @@ IF_BE(<	rev	r4, r4>)
 	adds	N, #8
 	beq	.Lmemxor3_done
 
-	C leftover does an LSB store
-	C so we need to reverse if actually BE
-IF_BE(<	rev	r4, r4>)
-
-	C Leftover bytes in a4, low end
-	ror	r4, ACNT
+	C Leftover bytes in r4, low end on LE and high end on BE before
+	C preparatory alignment correction
+IF_LE(`	ror	r4, ACNT')
+IF_BE(`	ror	r4, ATNC')
+	C now byte-aligned in high end on LE and low end on BE because we're
+	C working downwards in saving the very first bytes of the buffer
 .Lmemxor3_uu_leftover:
-	ror	r4, #24
+	C bring uppermost byte down for saving while preserving lower ones
+IF_LE(`	ror	r4, #24')
 	strb	r4, [DST, #-1]!
 	subs	N, #1
 	beq	.Lmemxor3_done
 	subs	ACNT, #8
+	C bring down next byte, no need to preserve
+IF_BE(`	lsr	r4, #8')
 	bne	.Lmemxor3_uu_leftover
 	b	.Lmemxor3_bytes
 

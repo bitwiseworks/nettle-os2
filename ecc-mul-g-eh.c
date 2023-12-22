@@ -45,7 +45,7 @@ ecc_mul_g_eh (const struct ecc_curve *ecc, mp_limb_t *r,
 	      const mp_limb_t *np, mp_limb_t *scratch)
 {
   /* Scratch need determined by the ecc_add_eh call. Current total is
-     9 * ecc->p.size, at most 648 bytes. */
+     7 * ecc->p.size, at most 392 bytes (for curve448). */
 #define tp scratch
 #define scratch_out (scratch + 3*ecc->p.size)
 
@@ -64,7 +64,7 @@ ecc_mul_g_eh (const struct ecc_curve *ecc, mp_limb_t *r,
 
   for (i = k; i-- > 0; )
     {
-      ecc_dup_eh (ecc, r, r, scratch);
+      ecc->dup (ecc, r, r, scratch);
       for (j = 0; j * c < bit_rows; j++)
 	{
 	  unsigned bits;
@@ -88,12 +88,12 @@ ecc_mul_g_eh (const struct ecc_curve *ecc, mp_limb_t *r,
 	      shift = bit_index % GMP_NUMB_BITS;
 	      bits = (bits << 1) | ((np[limb_index] >> shift) & 1);
 	    }
-	  sec_tabselect (tp, 2*ecc->p.size,
-			 (ecc->pippenger_table
-			  + (2*ecc->p.size * (mp_size_t) j << c)),
-			 1<<c, bits);
+	  mpn_sec_tabselect (tp,
+			     (ecc->pippenger_table
+			      + (2*ecc->p.size * (mp_size_t) j << c)),
+			      2*ecc->p.size, 1<<c, bits);
 
-	  ecc_add_eh (ecc, r, r, tp, scratch_out);
+	  ecc->add_hh (ecc, r, r, tp, scratch_out);
 	}
     }
 #undef tp

@@ -56,6 +56,7 @@
 #include "des.h"
 #include "eax.h"
 #include "gcm.h"
+#include "ghash-internal.h"
 #include "memxor.h"
 #include "salsa20.h"
 #include "salsa20-internal.h"
@@ -63,6 +64,7 @@
 #include "sha1.h"
 #include "sha2.h"
 #include "sha3.h"
+#include "sm4.h"
 #include "twofish.h"
 #include "umac.h"
 #include "cmac.h"
@@ -150,12 +152,6 @@ time_function(void (*f)(void *arg), void *arg)
 	ncalls *= 2;
     }
   return elapsed / ncalls - overhead;
-}
-
-static void
-bench_nothing(void *arg UNUSED)
-{
-  return;
 }
 
 struct bench_memxor_info
@@ -333,17 +329,6 @@ xalloc(size_t size)
   return p;
 }
 
-static void
-time_overhead(void)
-{
-  overhead = time_function(bench_nothing, NULL);
-  printf("benchmark call overhead: %7f us", overhead * 1e6);
-  if (frequency > 0.0)
-    printf("%7.2f cycles\n", overhead * frequency);
-  printf("\n");  
-}
-
-
 
 static void
 time_memxor(void)
@@ -407,7 +392,9 @@ time_umac(void)
   struct umac96_ctx ctx96;
   struct umac128_ctx ctx128;
 
-  uint8_t key[16];
+  uint8_t key[UMAC_KEY_SIZE];
+
+  init_key (sizeof(key), key);
 
   umac32_set_key (&ctx32, key);
   info.ctx = &ctx32;
@@ -449,7 +436,9 @@ time_cmac(void)
   struct bench_hash_info info;
   struct cmac_aes128_ctx ctx;
 
-  uint8_t key[16];
+  uint8_t key[AES128_KEY_SIZE];
+
+  init_key (sizeof(key), key);
 
   cmac_aes128_set_key (&ctx, key);
   info.ctx = &ctx;
@@ -466,7 +455,9 @@ time_poly1305_aes(void)
   static uint8_t data[BENCH_BLOCK];
   struct bench_hash_info info;
   struct poly1305_aes_ctx ctx;
-  uint8_t key[32];
+  uint8_t key[POLY1305_AES_KEY_SIZE];
+
+  init_key (sizeof(key), key);
 
   poly1305_aes_set_key (&ctx, key);
   info.ctx = &ctx;
@@ -780,21 +771,22 @@ time_aead(const struct nettle_aead *aead)
     display(aead->name, "encrypt", aead->block_size,
 	    time_function(bench_aead_crypt, &info));
   }
-  
-  {
-    struct bench_aead_info info;
-    info.ctx = ctx;
-    info.crypt = aead->decrypt;
-    info.data = data;
-    
-    init_key(aead->key_size, key);
-    aead->set_decrypt_key(ctx, key);
-    if (aead->set_nonce)
-      aead->set_nonce (ctx, nonce);
 
-    display(aead->name, "decrypt", aead->block_size,
-	    time_function(bench_aead_crypt, &info));
-  }
+  if (aead->decrypt)
+    {
+      struct bench_aead_info info;
+      info.ctx = ctx;
+      info.crypt = aead->decrypt;
+      info.data = data;
+    
+      init_key(aead->key_size, key);
+      aead->set_decrypt_key(ctx, key);
+      if (aead->set_nonce)
+	aead->set_nonce (ctx, nonce);
+
+      display(aead->name, "decrypt", aead->block_size,
+	      time_function(bench_aead_crypt, &info));
+    }
 
   if (aead->update)
     {
@@ -884,10 +876,22 @@ bench_sha3_permute(void)
   TIME_CYCLES (t, sha3_permute (&state));
   printf("sha3_permute: %.2f cycles (%.2f / round)\n", t, t / 24.0);
 }
+static void
+bench_ghash_update(void)
+{
+  struct gcm_key key;
+  union nettle_block16 state;
+  const uint8_t data[160];
+  double t;
+
+  TIME_CYCLES (t, _ghash_update (&key, &state, 10, data));
+  printf("ghash_update: %.2f cycles / block\n", t / 10.0);
+}
 #else
 #define bench_sha1_compress()
 #define bench_salsa20_core()
 #define bench_sha3_permute()
+#define bench_ghash_update()
 #endif
 
 #if WITH_OPENSSL
@@ -918,6 +922,8 @@ main(int argc, char **argv)
       &nettle_sha3_224, &nettle_sha3_256,
       &nettle_sha3_384, &nettle_sha3_512,
       &nettle_ripemd160, &nettle_gosthash94,
+      &nettle_gosthash94cp, &nettle_streebog256,
+      &nettle_streebog512, &nettle_sm3,
       NULL
     };
 
@@ -934,14 +940,17 @@ main(int argc, char **argv)
       &nettle_des3,
       &nettle_serpent256,
       &nettle_twofish128, &nettle_twofish192, &nettle_twofish256,
+      &nettle_sm4,
       NULL
     };
 
   const struct nettle_aead *aeads[] =
     {
       /* Stream ciphers */
-      &nettle_arcfour128, OPENSSL(&nettle_openssl_arcfour128)
+      &nettle_arcfour128,
       &nettle_salsa20, &nettle_salsa20r12, &nettle_chacha,
+      /* CBC encrypt */
+      &nettle_cbc_aes128, &nettle_cbc_aes192, &nettle_cbc_aes256,
       /* Proper AEAD algorithme. */
       &nettle_gcm_aes128,
       &nettle_gcm_aes192,
@@ -953,6 +962,7 @@ main(int argc, char **argv)
       &nettle_gcm_camellia256,
       &nettle_eax_aes128,
       &nettle_chacha_poly1305,
+      &nettle_ocb_aes128,
       NULL
     };
 
@@ -989,8 +999,8 @@ main(int argc, char **argv)
   bench_sha1_compress();
   bench_salsa20_core();
   bench_sha3_permute();
+  bench_ghash_update();
   printf("\n");
-  time_overhead();
 
   header();
 

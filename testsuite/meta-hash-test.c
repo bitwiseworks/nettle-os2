@@ -5,6 +5,8 @@
 #include "sha3.h"
 
 const char* hashes[] = {
+  "gosthash94",
+  "gosthash94cp",
   "md2",
   "md4",
   "md5",
@@ -18,6 +20,9 @@ const char* hashes[] = {
   "sha3_256",
   "sha3_384",
   "sha3_512",
+  "streebog256",
+  "streebog512",
+  "sm3",
 };
 
 void
@@ -31,6 +36,7 @@ test_main(void)
   }
 
   for (i = 0; NULL != nettle_hashes[i]; i++) {
+    ASSERT(nettle_hashes[i]->block_size <= NETTLE_MAX_HASH_BLOCK_SIZE);
     ASSERT(nettle_hashes[i]->digest_size <= NETTLE_MAX_HASH_DIGEST_SIZE);
     ASSERT(nettle_hashes[i]->context_size <= NETTLE_MAX_HASH_CONTEXT_SIZE);
   }

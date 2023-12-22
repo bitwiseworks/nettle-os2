@@ -30,7 +30,9 @@ information on how these licenses apply).
 
 If you have downloaded a Nettle release, build it with the usual
 ./configure && make && make check && make install (see the INSTALL
-file for further instructions).
+file for further instructions). Using GNU make is strongly
+recommended. Nettle's support for public key algorithms, such as RSA
+and ECDSA, depends on the GNU GMP library.
 
 You can also get Nettle from git, see
 http://www.lysator.liu.se/~nisse/nettle/ for current instructions. In
@@ -40,7 +42,7 @@ before running ./configure.
 Read the manual. Mail me if you have any questions or suggestions.
 
 You may want to subscribe to the nettle-bugs mailing list. See
-<URL: http://lists.lysator.liu.se/mailman/listinfo/nettle-bugs>.
+<URL: https://lists.lysator.liu.se/mailman3/postorius/lists/nettle-bugs.lists.lysator.liu.se/>.
 
 See CONTRIBUTING.md for information on contibuting patches.
 
